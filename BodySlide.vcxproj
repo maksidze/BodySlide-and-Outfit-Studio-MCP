@@ -96,7 +96,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\cpp-httplib;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -125,7 +125,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\bullet3\install\include\bullet;..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\bullet3\install\include\bullet;..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\cpp-httplib;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN64;_DEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;USE_BULLET;BT_USE_SSE_IN_API;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -155,7 +155,7 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\cpp-httplib;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>
@@ -192,7 +192,7 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\bullet3\install\include\bullet;..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\bullet3\install\include\bullet;..\wxWidgets\include\msvc;..\wxWidgets\include;lib;lib\gli;lib\nifly\include;lib\nifly\external;lib\TinyXML-2;lib\cpp-httplib;lib\fkYAML\include;lib\nlohmannjson\include</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN64;NDEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;USE_BULLET;BT_USE_SSE_IN_API;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>
@@ -952,4 +952,18 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClCompile Include="src\components\BodySlideBuildPlan.cpp" />
+    <ClCompile Include="src\mcp\McpProtocol.cpp" />
+    <ClCompile Include="src\mcp\McpServer.cpp" />
+    <ClCompile Include="src\mcp\BodySlideMcp.cpp" />
+    <ClCompile Include="src\utils\MainThreadDispatcher.cpp" />
+    <ClInclude Include="src\components\BodySlideBuildPlan.h" />
+    <ClInclude Include="src\components\BodySlideBatch.h" />
+    <ClInclude Include="src\mcp\BodySlideMcp.h" />
+    <ClInclude Include="src\mcp\McpArgs.h" />
+    <ClInclude Include="src\mcp\McpProtocol.h" />
+    <ClInclude Include="src\mcp\McpServer.h" />
+    <ClInclude Include="src\utils\MainThreadDispatcher.h" />
+  </ItemGroup>
 </Project>

@@ -87,8 +87,14 @@ struct ShapePreviewData {
 };
 
 class BodySlideFrame;
+class BodySlideMcp;
+struct BodySlideBatchOptions;
 
 class BodySlideApp : public wxApp {
+	friend class BodySlideMcp;
+	std::unique_ptr<BodySlideMcp> mcp;
+	bool cmdMcp = false;
+	long cmdMcpPort = -1;
 	/* UI Managers */
 	BodySlideFrame* sliderView = nullptr;
 	PreviewPanel* preview = nullptr;
@@ -297,6 +303,8 @@ private:
 
 public:
 	virtual ~BodySlideApp();
+	bool StartMcpServer(int port = -1, bool showError = true);
+	void StopMcpServer();
 	// Loads the reference skeleton of the current game into the application
 	// skeleton if it isn't already.
 	bool EnsurePreviewSkeleton();
@@ -441,7 +449,7 @@ public:
 					  std::vector<uint16_t>& zapidx,
 					  std::vector<nifly::Vector2>* uvs = nullptr);
 	bool WriteMorphTRI(const std::string& triPath, SliderSet& sliderSet, nifly::NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices);
-	bool WriteSFMorphFile(const std::string& morphFolder, SliderSet& sliderSet, nifly::NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices);
+	bool WriteSFMorphFile(const std::string& morphFolder, SliderSet& sliderSet, nifly::NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices, bool unattended = false);
 
 	void CopySliderValues(bool toHigh);
 	void CopyPreviewWeightToSliders();
@@ -546,7 +554,8 @@ public:
 						bool remove = false,
 						bool tri = false,
 						bool forceNormals = false,
-						const std::string& custPath = "");
+						const std::string& custPath = "",
+						BodySlideBatchOptions* options = nullptr);
 	int ShowBuildOverrideWithPreview(wxDialog* dlg, wxTreeListCtrl* treeListCtrl);
 
 	// True if any of the command-line options that select outfits for a build was given.
@@ -577,7 +586,10 @@ public:
 	int SavePresetGroups(const std::string& outputFile, const std::string& presetName, std::vector<std::string>& groups);
 };
 
-static const wxCmdLineEntryDesc g_cmdLineDesc[] = {{wxCMD_LINE_OPTION, "gbuild", "groupbuild", "builds the specified group on launch", wxCMD_LINE_VAL_STRING},
+static const wxCmdLineEntryDesc g_cmdLineDesc[] = {
+	{wxCMD_LINE_SWITCH, nullptr, "mcp", "Start the BodySlide MCP server"},
+	{wxCMD_LINE_OPTION, nullptr, "mcp-port", "BodySlide MCP port (default 47824)", wxCMD_LINE_VAL_NUMBER},
+	{wxCMD_LINE_OPTION, "gbuild", "groupbuild", "builds the specified group on launch", wxCMD_LINE_VAL_STRING},
 												   {wxCMD_LINE_OPTION,
 													"b",
 													"build",

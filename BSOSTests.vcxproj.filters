@@ -273,4 +273,8 @@
       <Filter>Libraries</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="tests\BodySlideBuildPlanTest.cpp" />
+    <ClCompile Include="src\components\BodySlideBuildPlan.cpp" />
+  </ItemGroup>
 </Project>

@@ -8,6 +8,7 @@ BodySlide and Outfit Studio, a tool to convert, create, and customize outfits an
 ## Documentation
 * [Wiki Overview](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki)
 * [Guides and Documentation](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Guides-and-Documentation)
+* [BodySlide MCP: catalog, build plans, conflicts and batch reports](docs/BodySlide-MCP.md)
 
 ## Build Instructions
 * [Building on Windows (Visual Studio or CMake)](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Building-on-Windows-%28Visual-Studio-or-CMake%29)

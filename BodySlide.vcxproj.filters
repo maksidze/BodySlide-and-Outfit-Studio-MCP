@@ -2199,4 +2199,18 @@
       <Filter>Files</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\components\BodySlideBuildPlan.cpp" />
+    <ClCompile Include="src\mcp\McpProtocol.cpp" />
+    <ClCompile Include="src\mcp\McpServer.cpp" />
+    <ClCompile Include="src\mcp\BodySlideMcp.cpp" />
+    <ClCompile Include="src\utils\MainThreadDispatcher.cpp" />
+    <ClInclude Include="src\components\BodySlideBuildPlan.h" />
+    <ClInclude Include="src\components\BodySlideBatch.h" />
+    <ClInclude Include="src\mcp\BodySlideMcp.h" />
+    <ClInclude Include="src\mcp\McpArgs.h" />
+    <ClInclude Include="src\mcp\McpProtocol.h" />
+    <ClInclude Include="src\mcp\McpServer.h" />
+    <ClInclude Include="src\utils\MainThreadDispatcher.h" />
+  </ItemGroup>
 </Project>

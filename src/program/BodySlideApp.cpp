@@ -16,6 +16,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "BodySlideApp.h"
+#include "../components/BodySlideBatch.h"
+#include "../mcp/BodySlideMcp.h"
 #include "../components/ClippingFixer.h"
 #include "../components/Mesh.h"
 #include "../components/SliderSetIndex.h"
@@ -145,6 +147,7 @@ wxEND_EVENT_TABLE()
 wxIMPLEMENT_APP(BodySlideApp);
 
 BodySlideApp::~BodySlideApp() {
+	StopMcpServer();
 	++previewLoadGeneration;
 	if (previewLoadThread.joinable())
 		previewLoadThread.join();
@@ -308,8 +311,11 @@ bool BodySlideApp::OnInit() {
 
 	if (HasCmdLineBuild())
 		CommandLineBuild();
-	else
+	else {
 		sliderView->delayLoad.Start(100, true);
+		if (cmdMcp || BodySlideConfig.GetBoolValue("MCP/Enabled"))
+			StartMcpServer(cmdMcpPort > 0 ? static_cast<int>(cmdMcpPort) : -1, cmdMcp);
+	}
 
 	return true;
 }
@@ -319,6 +325,12 @@ void BodySlideApp::OnInitCmdLine(wxCmdLineParser& parser) {
 }
 
 bool BodySlideApp::OnCmdLineParsed(wxCmdLineParser& parser) {
+	cmdMcp = parser.Found("mcp");
+	parser.Found("mcp-port", &cmdMcpPort);
+	if (cmdMcpPort != -1 && (cmdMcpPort < 1 || cmdMcpPort > 65535)) {
+		wxLogError("MCP port must be between 1 and 65535.");
+		return false;
+	}
 	wxString gbuild;
 	parser.Found("gbuild", &gbuild);
 
@@ -405,6 +417,29 @@ bool BodySlideApp::OnCmdLineParsed(wxCmdLineParser& parser) {
 	}
 
 	return true;
+}
+
+bool BodySlideApp::StartMcpServer(int port, bool showError) {
+	if (!mcp)
+		mcp = std::make_unique<BodySlideMcp>(*this);
+	if (mcp->IsRunning())
+		return true;
+	if (port < 0)
+		port = BodySlideConfig.GetIntValue("MCP/Port", BodySlideMcpDefaultPort);
+	std::string error;
+	if (!mcp->Start(port, BodySlideConfig["MCP/Token"], error)) {
+		wxLogWarning("BodySlide MCP: %s", error);
+		if (showError)
+			wxMessageBox(wxString::FromUTF8(error), "BodySlide MCP", wxOK | wxICON_ERROR, sliderView);
+		return false;
+	}
+	wxLogMessage("BodySlide MCP server: %s", mcp->GetUrl());
+	return true;
+}
+
+void BodySlideApp::StopMcpServer() {
+	if (mcp)
+		mcp->Stop();
 }
 
 bool BodySlideApp::OnExceptionInMainLoop() {
@@ -1908,7 +1943,7 @@ bool BodySlideApp::WriteMorphTRI(const std::string& triPath, SliderSet& sliderSe
 	return true;
 }
 
-bool BodySlideApp::WriteSFMorphFile(const std::string& morphFolder, SliderSet& sliderSet, NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices) {
+bool BodySlideApp::WriteSFMorphFile(const std::string& morphFolder, SliderSet& sliderSet, NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices, bool unattended) {
 	std::string targetShapeName = sliderSet.GetSFMorphTargetShape();
 	if (targetShapeName.empty()) {
 		wxLogMessage("No morph target shape designated, skipping morph.dat.");
@@ -2014,8 +2049,9 @@ bool BodySlideApp::WriteSFMorphFile(const std::string& morphFolder, SliderSet& s
 
 	if (!morphFile.Write(shapeFilePath)) {
 		wxLogError("Failed to write morph.dat file to '%s'!", shapeFilePath);
-		wxMessageBox(wxString().Format(_("Failed to write morph.dat file to the following location\n\n%s"), shapeFilePath),
-					 _("Unable to process"), wxOK | wxICON_ERROR);
+		if (!unattended)
+			wxMessageBox(wxString().Format(_("Failed to write morph.dat file to the following location\n\n%s"), shapeFilePath),
+						 _("Unable to process"), wxOK | wxICON_ERROR);
 		return false;
 	}
 
@@ -5103,305 +5139,320 @@ int BodySlideApp::ShowBuildOverrideWithPreview(wxDialog* dlg, wxTreeListCtrl* tr
 }
 
 int BodySlideApp::BuildListBodies(
-	std::vector<std::string>& outfitList, std::map<std::string, std::string>& failedOutfits, bool clean, bool tri, bool forceNormals, const std::string& custPath) {
+	std::vector<std::string>& outfitList, std::map<std::string, std::string>& failedOutfits, bool clean, bool tri, bool forceNormals, const std::string& custPath, BodySlideBatchOptions* options) {
 	std::string datapath = custPath;
+	if (outfitList.empty())
+		return failedOutfits.empty() ? 0 : 3;
+	if (options && (clean || datapath.empty())) {
+		failedOutfits["build"] = "Unattended builds require an explicit output directory and cannot clean.";
+		return 3;
+	}
+	const std::string activePreset = options ? options->preset : BodySlideConfig["SelectedPreset"];
+	SliderManager& batchSliders = options ? options->sliders : sliderManager;
+	const bool conform = options ? options->conformAddOns : conformAddOnSliders;
+	const float clippingStrength = options ? options->clippingFixStrength : clippingFixStrength;
 
 	wxLogMessage("Started batch build with options: Custom Path = %s, Cleaning = %s, TRI = %s",
 				 custPath.empty() ? "False" : custPath,
 				 clean ? "True" : "False",
 				 tri ? "True" : "False");
 
-	if (clean) {
-		int ret = wxMessageBox(_("WARNING: This will delete the output files from the output folders, potentially causing crashes.\n\nDo you want to continue?"),
-							   _("Clean Batch Build"),
-							   wxYES_NO | wxCANCEL | wxICON_EXCLAMATION);
-		if (ret != wxYES) {
-			wxLogMessage("Aborted cleaning batch build.");
-			return 1;
-		}
-	}
-
-	std::string activePreset = BodySlideConfig["SelectedPreset"];
-
-	if (datapath.empty()) {
-		if (GetOutputDataPath().empty()) {
-			if (clean) {
-				wxLogError("Aborted batch clean with unconfigured data path. Files can't be removed that way.");
-				wxMessageBox(_("WARNING: Game data path not configured. Files can't be removed that way."), _("Game not found"), wxOK | wxICON_ERROR);
+	if (!options) {
+		if (clean) {
+			int ret = wxMessageBox(_("WARNING: This will delete the output files from the output folders, potentially causing crashes.\n\nDo you want to continue?"),
+								   _("Clean Batch Build"),
+								   wxYES_NO | wxCANCEL | wxICON_EXCLAMATION);
+			if (ret != wxYES) {
+				wxLogMessage("Aborted cleaning batch build.");
 				return 1;
 			}
-			if (Config["WarnMissingGamePath"] == "true") {
-				int ret = wxMessageBox(_("WARNING: Game data path not configured. Continue saving files to the working directory?"),
-									   _("Game not found"),
-									   wxYES_NO | wxCANCEL | wxICON_EXCLAMATION);
-				if (ret != wxYES) {
-					wxLogError("Aborted batch build with unconfigured data path.");
+		}
+
+
+		if (datapath.empty()) {
+			if (GetOutputDataPath().empty()) {
+				if (clean) {
+					wxLogError("Aborted batch clean with unconfigured data path. Files can't be removed that way.");
+					wxMessageBox(_("WARNING: Game data path not configured. Files can't be removed that way."), _("Game not found"), wxOK | wxICON_ERROR);
 					return 1;
 				}
+				if (Config["WarnMissingGamePath"] == "true") {
+					int ret = wxMessageBox(_("WARNING: Game data path not configured. Continue saving files to the working directory?"),
+										   _("Game not found"),
+										   wxYES_NO | wxCANCEL | wxICON_EXCLAMATION);
+					if (ret != wxYES) {
+						wxLogError("Aborted batch build with unconfigured data path.");
+						return 1;
+					}
+				}
+
+				Config.SetValue("GameDataPath", Config["AppDir"] + PathSepStr);
 			}
 
-			Config.SetValue("GameDataPath", Config["AppDir"] + PathSepStr);
+			datapath = GetOutputDataPath();
 		}
 
-		datapath = GetOutputDataPath();
-	}
+		std::vector<std::string> outFileList;
+		std::vector<wxArrayString> choicesList;
+		std::vector<std::pair<std::string, std::string>> implicitChoices;
+		for (auto& outFile : outFileCount) {
+			if (outFile.second.size() > 1) {
+				wxArrayString selOutfits;
+				for (auto& outfit : outFile.second) {
+					// Only if it's going to be batch built
+					if (std::find(outfitList.begin(), outfitList.end(), outfit) != outfitList.end())
+						selOutfits.Add(wxString::FromUTF8(outfit));
+				}
 
-	std::vector<std::string> outFileList;
-	std::vector<wxArrayString> choicesList;
-	std::vector<std::pair<std::string, std::string>> implicitChoices;
-	for (auto& outFile : outFileCount) {
-		if (outFile.second.size() > 1) {
-			wxArrayString selOutfits;
-			for (auto& outfit : outFile.second) {
-				// Only if it's going to be batch built
-				if (std::find(outfitList.begin(), outfitList.end(), outfit) != outfitList.end())
-					selOutfits.Add(wxString::FromUTF8(outfit));
-			}
-
-			// Same file would not be written more than once, but the only selected outfit becomes the output choice
-			if (selOutfits.size() <= 1) {
-				if (selOutfits.size() == 1 && !clean)
-					implicitChoices.emplace_back(outFile.first, selOutfits[0].ToUTF8().data());
-				continue;
-			}
-
-			outFileList.push_back(outFile.first);
-			choicesList.push_back(selOutfits);
-		}
-	}
-
-	// Load BuildSelection file or create new one
-	BuildSelectionFile buildSelFile;
-	BuildSelection buildSelection;
-	if (!choicesList.empty() || !implicitChoices.empty())
-		GetBuildSelection(buildSelFile, buildSelection);
-
-	for (auto& implicitChoice : implicitChoices)
-		buildSelection.SetOutputChoice(implicitChoice.first, implicitChoice.second);
-
-	// Quiet builds take the saved choice or the first one instead of asking
-	if (!choicesList.empty() && cmdQuiet) {
-		for (size_t i = 0; i < choicesList.size(); i++) {
-			std::string choice = buildSelection.GetOutputChoice(outFileList[i]);
-			if (choice.empty() || choicesList[i].Index(wxString::FromUTF8(choice)) == wxNOT_FOUND)
-				choice = choicesList[i][0].ToUTF8().data();
-			wxLogWarning("Outfits '%s' all write '%s', building '%s'.", wxJoin(choicesList[i], ','), outFileList[i], choice);
-
-			for (auto& outfit : choicesList[i]) {
-				if (outfit.ToUTF8().data() == choice)
+				// Same file would not be written more than once, but the only selected outfit becomes the output choice
+				if (selOutfits.size() <= 1) {
+					if (selOutfits.size() == 1 && !clean)
+						implicitChoices.emplace_back(outFile.first, selOutfits[0].ToUTF8().data());
 					continue;
-				auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToUTF8().data());
-				if (result != outfitList.end())
-					outfitList.erase(result);
+				}
+
+				outFileList.push_back(outFile.first);
+				choicesList.push_back(selOutfits);
 			}
 		}
-		choicesList.clear();
-	}
 
-	if (!choicesList.empty()) {
-		wxXmlResource* rsrc = wxXmlResource::Get();
-		wxDialog* dlgBuildOverride = rsrc->LoadDialog(sliderView, "dlgBuildOverride");
-		dlgBuildOverride->SetSize(dlgBuildOverride->FromDIP(wxSize(800, 400)));
-		dlgBuildOverride->SetSizeHints(dlgBuildOverride->FromDIP(wxSize(400, 400)), dlgBuildOverride->FromDIP(wxSize(-1, -1)));
-		dlgBuildOverride->CenterOnParent();
+		// Load BuildSelection file or create new one
+		BuildSelectionFile buildSelFile;
+		BuildSelection buildSelection;
+		if (!choicesList.empty() || !implicitChoices.empty())
+			GetBuildSelection(buildSelFile, buildSelection);
 
-		wxScrolledWindow* scrollOverrides = XRCCTRL(*dlgBuildOverride, "scrollOverrides", wxScrolledWindow);
-		wxBoxSizer* choicesSizer = (wxBoxSizer*)scrollOverrides->GetSizer();
+		for (auto& implicitChoice : implicitChoices)
+			buildSelection.SetOutputChoice(implicitChoice.first, implicitChoice.second);
 
-		// Create the treelist with checkbox support
-		auto treeListCtrl = new wxTreeListCtrl(scrollOverrides, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTL_SINGLE | wxTL_CHECKBOX | wxTL_3STATE);
-		treeListCtrl->AppendColumn(_("Choice"), wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT);
-		treeListCtrl->AppendColumn(_("Source File"), wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT);
+		// Quiet builds take the saved choice or the first one instead of asking
+		if (!choicesList.empty() && cmdQuiet) {
+			for (size_t i = 0; i < choicesList.size(); i++) {
+				std::string choice = buildSelection.GetOutputChoice(outFileList[i]);
+				if (choice.empty() || choicesList[i].Index(wxString::FromUTF8(choice)) == wxNOT_FOUND)
+					choice = choicesList[i][0].ToUTF8().data();
+				wxLogWarning("Outfits '%s' all write '%s', building '%s'.", wxJoin(choicesList[i], ','), outFileList[i], choice);
 
-		// Add root items directly under the (hidden) root
-		for (size_t i = 0; i < choicesList.size(); i++) {
-			auto& outFile = outFileList[i];
-			auto& choices = choicesList[i];
-			bool hasDefaultSet = false;
-
-			wxTreeListItem rootItem = treeListCtrl->AppendItem(treeListCtrl->GetRootItem(), wxString::FromUTF8(outFile));
-			treeListCtrl->CheckItem(rootItem, wxCheckBoxState::wxCHK_UNDETERMINED);
-
-			// Add children with checkboxes
-			for (size_t j = 0; j < choices.size(); j++) {
-				wxString choice = choices[j];
-				wxString defaultSet;
-
-				// Check previous choices to see if radio button should be checked by default
-				std::string outputChoice = buildSelection.GetOutputChoice(outFile);
-				if (!outputChoice.empty()) {
-					wxString c = wxString::FromUTF8(outputChoice);
-					if (choices.Index(c) != wxNOT_FOUND) {
-						defaultSet = c;
-						hasDefaultSet = true;
-					}
-				}
-
-				if (!hasDefaultSet && j == 0)
-					defaultSet = choice;
-
-				wxTreeListItem child = treeListCtrl->AppendItem(rootItem, choice);
-
-				auto outfitSrc = outfitNameSource.find(choice.ToUTF8().data());
-				if (outfitSrc != outfitNameSource.end()) {
-					wxFileName outfitFileName(wxString::FromUTF8(outfitSrc->second));
-					treeListCtrl->SetItemText(child, 1, outfitFileName.GetFullName());
-				}
-				else
-					treeListCtrl->SetItemText(child, 1, _("<no source>"));
-
-				if (!defaultSet.IsEmpty() && choice == defaultSet)
-					treeListCtrl->CheckItem(child, wxCheckBoxState::wxCHK_CHECKED);
-				else
-					treeListCtrl->CheckItem(child, wxCheckBoxState::wxCHK_UNCHECKED);
-			}
-
-			treeListCtrl->Expand(rootItem);
-		}
-
-		bool checkBoxReverting = false;
-		auto handler = [&](wxTreeListEvent& e) {
-			if (checkBoxReverting) {
-				e.Skip();
-				return;
-			}
-
-			const wxTreeListItem item = e.GetItem();
-			const wxTreeListItem parent = treeListCtrl->GetItemParent(item);
-
-			// Level 1 items are direct children of the (hidden) root: make them non-checkable.
-			if (parent == treeListCtrl->GetRootItem()) {
-				checkBoxReverting = true;
-				treeListCtrl->CheckItem(item, wxCheckBoxState::wxCHK_UNDETERMINED);
-				checkBoxReverting = false;
-				return;
-			}
-
-			// Only enforce the 'radio per level' rule for level-2 items:
-			checkBoxReverting = true;
-
-			auto checkedState = treeListCtrl->GetCheckedState(item);
-			if (checkedState == wxCheckBoxState::wxCHK_CHECKED) {
-				// Uncheck all siblings
-				for (wxTreeListItem sib = treeListCtrl->GetFirstChild(parent); sib.IsOk(); sib = treeListCtrl->GetNextSibling(sib)) {
-					if (sib != item && treeListCtrl->GetCheckedState(sib) == wxCheckBoxState::wxCHK_CHECKED)
-						treeListCtrl->CheckItem(sib, wxCheckBoxState::wxCHK_UNCHECKED);
-				}
-			}
-			else if (checkedState == wxCheckBoxState::wxCHK_UNCHECKED) {
-				// Ensure at least one remains checked in this level
-				bool anyChecked = false;
-				for (wxTreeListItem sib = treeListCtrl->GetFirstChild(parent); sib.IsOk(); sib = treeListCtrl->GetNextSibling(sib)) {
-					if (treeListCtrl->GetCheckedState(sib) == wxCheckBoxState::wxCHK_CHECKED) {
-						anyChecked = true;
-						break;
-					}
-				}
-
-				if (!anyChecked) {
-					// Re-check the one user tried to uncheck
-					treeListCtrl->CheckItem(item, wxCheckBoxState::wxCHK_CHECKED);
-				}
-			}
-
-			checkBoxReverting = false;
-			e.Skip();
-		};
-
-		treeListCtrl->Bind(wxEVT_TREELIST_ITEM_CHECKED, handler);
-
-		wxTextCtrl* chooseText = XRCCTRL(*dlgBuildOverride, "chooseText", wxTextCtrl);
-		if (chooseText) {
-			chooseText->Bind(wxEVT_TEXT_ENTER, [&](wxCommandEvent& WXUNUSED(event)) {
-				wxString text = chooseText->GetValue().MakeLower();
-				if (!text.IsEmpty()) {
-					wxTreeListItem root = treeListCtrl->GetRootItem();
-
-					for (wxTreeListItem level1 = treeListCtrl->GetFirstChild(root); level1.IsOk(); level1 = treeListCtrl->GetNextSibling(level1)) {
-						wxTreeListItem firstMatch;
-
-						// Find first matching item
-						for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
-							wxString label = treeListCtrl->GetItemText(level2).Lower();
-
-							if (label.Contains(text)) {
-								firstMatch = level2;
-								break;
-							}
-						}
-
-						if (firstMatch.IsOk()) {
-							// Check the matched item
-							treeListCtrl->CheckItem(firstMatch, wxCheckBoxState::wxCHK_CHECKED);
-
-							// Uncheck all siblings except the matched one
-							for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
-								if (level2 != firstMatch)
-									treeListCtrl->CheckItem(level2, wxCheckBoxState::wxCHK_UNCHECKED);
-							}
-						}
-						// else: no match found, do nothing / keep existing checks
-					}
-				}
-			});
-		}
-
-		choicesSizer->Add(treeListCtrl, 1, wxEXPAND, 0);
-		scrollOverrides->FitInside();
-
-		if (ShowBuildOverrideWithPreview(dlgBuildOverride, treeListCtrl) == wxID_CANCEL) {
-			wxLogMessage("Aborted batch build by not choosing a file override.");
-			delete dlgBuildOverride;
-			return 1;
-		}
-
-		wxTreeListItem root = treeListCtrl->GetRootItem();
-
-		// Iterate level 1 roots (should correspond to choicesList size)
-		size_t index = 0;
-		for (wxTreeListItem level1 = treeListCtrl->GetFirstChild(root); level1.IsOk() && index < choicesList.size(); level1 = treeListCtrl->GetNextSibling(level1), ++index) {
-			wxString checkedItemText;
-
-			// Find the checked child (level 2)
-			for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
-				if (treeListCtrl->GetCheckedState(level2) == wxCheckBoxState::wxCHK_CHECKED) {
-					checkedItemText = treeListCtrl->GetItemText(level2);
-					break; // assuming only one checked per level 1
-				}
-			}
-
-			if (!checkedItemText.IsEmpty()) {
-				wxString choiceSel = checkedItemText;
-
-				// Add output choice to file
-				buildSelection.SetOutputChoice(outFileList[index], choiceSel.ToUTF8().data());
-
-				// Remove the selected choice from choicesList[i]
-				choicesList[index].Remove(choiceSel);
-
-				// Remove from outfitList all outfits in choicesList[index]
-				for (auto& outfit : choicesList[index]) {
-					auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToStdString());
+				for (auto& outfit : choicesList[i]) {
+					if (outfit.ToUTF8().data() == choice)
+						continue;
+					auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToUTF8().data());
 					if (result != outfitList.end())
 						outfitList.erase(result);
 				}
 			}
+			choicesList.clear();
 		}
 
+		if (!choicesList.empty()) {
+			wxXmlResource* rsrc = wxXmlResource::Get();
+			wxDialog* dlgBuildOverride = rsrc->LoadDialog(sliderView, "dlgBuildOverride");
+			dlgBuildOverride->SetSize(dlgBuildOverride->FromDIP(wxSize(800, 400)));
+			dlgBuildOverride->SetSizeHints(dlgBuildOverride->FromDIP(wxSize(400, 400)), dlgBuildOverride->FromDIP(wxSize(-1, -1)));
+			dlgBuildOverride->CenterOnParent();
 
-		delete dlgBuildOverride;
-	}
+			wxScrolledWindow* scrollOverrides = XRCCTRL(*dlgBuildOverride, "scrollOverrides", wxScrolledWindow);
+			wxBoxSizer* choicesSizer = (wxBoxSizer*)scrollOverrides->GetSizer();
 
-	if ((!choicesList.empty() || !implicitChoices.empty()) && !cmdQuiet) {
-		// Save output choices to file
-		buildSelFile.UpdateOutputChoices(buildSelection);
-		buildSelFile.Save();
+			// Create the treelist with checkbox support
+			auto treeListCtrl = new wxTreeListCtrl(scrollOverrides, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTL_SINGLE | wxTL_CHECKBOX | wxTL_3STATE);
+			treeListCtrl->AppendColumn(_("Choice"), wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT);
+			treeListCtrl->AppendColumn(_("Source File"), wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT);
+
+			// Add root items directly under the (hidden) root
+			for (size_t i = 0; i < choicesList.size(); i++) {
+				auto& outFile = outFileList[i];
+				auto& choices = choicesList[i];
+				bool hasDefaultSet = false;
+
+				wxTreeListItem rootItem = treeListCtrl->AppendItem(treeListCtrl->GetRootItem(), wxString::FromUTF8(outFile));
+				treeListCtrl->CheckItem(rootItem, wxCheckBoxState::wxCHK_UNDETERMINED);
+
+				// Add children with checkboxes
+				for (size_t j = 0; j < choices.size(); j++) {
+					wxString choice = choices[j];
+					wxString defaultSet;
+
+					// Check previous choices to see if radio button should be checked by default
+					std::string outputChoice = buildSelection.GetOutputChoice(outFile);
+					if (!outputChoice.empty()) {
+						wxString c = wxString::FromUTF8(outputChoice);
+						if (choices.Index(c) != wxNOT_FOUND) {
+							defaultSet = c;
+							hasDefaultSet = true;
+						}
+					}
+
+					if (!hasDefaultSet && j == 0)
+						defaultSet = choice;
+
+					wxTreeListItem child = treeListCtrl->AppendItem(rootItem, choice);
+
+					auto outfitSrc = outfitNameSource.find(choice.ToUTF8().data());
+					if (outfitSrc != outfitNameSource.end()) {
+						wxFileName outfitFileName(wxString::FromUTF8(outfitSrc->second));
+						treeListCtrl->SetItemText(child, 1, outfitFileName.GetFullName());
+					}
+					else
+						treeListCtrl->SetItemText(child, 1, _("<no source>"));
+
+					if (!defaultSet.IsEmpty() && choice == defaultSet)
+						treeListCtrl->CheckItem(child, wxCheckBoxState::wxCHK_CHECKED);
+					else
+						treeListCtrl->CheckItem(child, wxCheckBoxState::wxCHK_UNCHECKED);
+				}
+
+				treeListCtrl->Expand(rootItem);
+			}
+
+			bool checkBoxReverting = false;
+			auto handler = [&](wxTreeListEvent& e) {
+				if (checkBoxReverting) {
+					e.Skip();
+					return;
+				}
+
+				const wxTreeListItem item = e.GetItem();
+				const wxTreeListItem parent = treeListCtrl->GetItemParent(item);
+
+				// Level 1 items are direct children of the (hidden) root: make them non-checkable.
+				if (parent == treeListCtrl->GetRootItem()) {
+					checkBoxReverting = true;
+					treeListCtrl->CheckItem(item, wxCheckBoxState::wxCHK_UNDETERMINED);
+					checkBoxReverting = false;
+					return;
+				}
+
+				// Only enforce the 'radio per level' rule for level-2 items:
+				checkBoxReverting = true;
+
+				auto checkedState = treeListCtrl->GetCheckedState(item);
+				if (checkedState == wxCheckBoxState::wxCHK_CHECKED) {
+					// Uncheck all siblings
+					for (wxTreeListItem sib = treeListCtrl->GetFirstChild(parent); sib.IsOk(); sib = treeListCtrl->GetNextSibling(sib)) {
+						if (sib != item && treeListCtrl->GetCheckedState(sib) == wxCheckBoxState::wxCHK_CHECKED)
+							treeListCtrl->CheckItem(sib, wxCheckBoxState::wxCHK_UNCHECKED);
+					}
+				}
+				else if (checkedState == wxCheckBoxState::wxCHK_UNCHECKED) {
+					// Ensure at least one remains checked in this level
+					bool anyChecked = false;
+					for (wxTreeListItem sib = treeListCtrl->GetFirstChild(parent); sib.IsOk(); sib = treeListCtrl->GetNextSibling(sib)) {
+						if (treeListCtrl->GetCheckedState(sib) == wxCheckBoxState::wxCHK_CHECKED) {
+							anyChecked = true;
+							break;
+						}
+					}
+
+					if (!anyChecked) {
+						// Re-check the one user tried to uncheck
+						treeListCtrl->CheckItem(item, wxCheckBoxState::wxCHK_CHECKED);
+					}
+				}
+
+				checkBoxReverting = false;
+				e.Skip();
+			};
+
+			treeListCtrl->Bind(wxEVT_TREELIST_ITEM_CHECKED, handler);
+
+			wxTextCtrl* chooseText = XRCCTRL(*dlgBuildOverride, "chooseText", wxTextCtrl);
+			if (chooseText) {
+				chooseText->Bind(wxEVT_TEXT_ENTER, [&](wxCommandEvent& WXUNUSED(event)) {
+					wxString text = chooseText->GetValue().MakeLower();
+					if (!text.IsEmpty()) {
+						wxTreeListItem root = treeListCtrl->GetRootItem();
+
+						for (wxTreeListItem level1 = treeListCtrl->GetFirstChild(root); level1.IsOk(); level1 = treeListCtrl->GetNextSibling(level1)) {
+							wxTreeListItem firstMatch;
+
+							// Find first matching item
+							for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
+								wxString label = treeListCtrl->GetItemText(level2).Lower();
+
+								if (label.Contains(text)) {
+									firstMatch = level2;
+									break;
+								}
+							}
+
+							if (firstMatch.IsOk()) {
+								// Check the matched item
+								treeListCtrl->CheckItem(firstMatch, wxCheckBoxState::wxCHK_CHECKED);
+
+								// Uncheck all siblings except the matched one
+								for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
+									if (level2 != firstMatch)
+										treeListCtrl->CheckItem(level2, wxCheckBoxState::wxCHK_UNCHECKED);
+								}
+							}
+							// else: no match found, do nothing / keep existing checks
+						}
+					}
+				});
+			}
+
+			choicesSizer->Add(treeListCtrl, 1, wxEXPAND, 0);
+			scrollOverrides->FitInside();
+
+			if (ShowBuildOverrideWithPreview(dlgBuildOverride, treeListCtrl) == wxID_CANCEL) {
+				wxLogMessage("Aborted batch build by not choosing a file override.");
+				delete dlgBuildOverride;
+				return 1;
+			}
+
+			wxTreeListItem root = treeListCtrl->GetRootItem();
+
+			// Iterate level 1 roots (should correspond to choicesList size)
+			size_t index = 0;
+			for (wxTreeListItem level1 = treeListCtrl->GetFirstChild(root); level1.IsOk() && index < choicesList.size(); level1 = treeListCtrl->GetNextSibling(level1), ++index) {
+				wxString checkedItemText;
+
+				// Find the checked child (level 2)
+				for (wxTreeListItem level2 = treeListCtrl->GetFirstChild(level1); level2.IsOk(); level2 = treeListCtrl->GetNextSibling(level2)) {
+					if (treeListCtrl->GetCheckedState(level2) == wxCheckBoxState::wxCHK_CHECKED) {
+						checkedItemText = treeListCtrl->GetItemText(level2);
+						break; // assuming only one checked per level 1
+					}
+				}
+
+				if (!checkedItemText.IsEmpty()) {
+					wxString choiceSel = checkedItemText;
+
+					// Add output choice to file
+					buildSelection.SetOutputChoice(outFileList[index], choiceSel.ToUTF8().data());
+
+					// Remove the selected choice from choicesList[i]
+					choicesList[index].Remove(choiceSel);
+
+					// Remove from outfitList all outfits in choicesList[index]
+					for (auto& outfit : choicesList[index]) {
+						auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToStdString());
+						if (result != outfitList.end())
+							outfitList.erase(result);
+					}
+				}
+			}
+
+
+			delete dlgBuildOverride;
+		}
+
+		if ((!choicesList.empty() || !implicitChoices.empty()) && !cmdQuiet) {
+			// Save output choices to file
+			buildSelFile.UpdateOutputChoices(buildSelection);
+			buildSelFile.Save();
+		}
+
 	}
 
 	refNormalsCache.clear();
 
-	wxProgressDialog progWnd(_("Processing Outfits"), _("Starting..."), 1000, sliderView, wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_ELAPSED_TIME);
-	progWnd.SetSize(400, 150);
+	std::unique_ptr<wxProgressDialog> progWnd;
+	if (!options) {
+		progWnd = std::make_unique<wxProgressDialog>(_("Processing Outfits"), _("Starting..."), 1000, sliderView, wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_ELAPSED_TIME);
+		progWnd->SetSize(400, 150);
+	}
 	float progstep = 1000.0f / outfitList.size();
 	std::atomic<int> count = 0;
 	std::unordered_map<std::string, std::string> failedOutfitsCon;
@@ -5434,7 +5485,7 @@ int BodySlideApp::BuildListBodies(
 	};
 
 	// Conforming uses the skinning of the shapes, which needs the skeleton. It's loaded here and not on the threads.
-	if (conformAddOnSliders)
+	if (conform)
 		EnsurePreviewSkeleton();
 
 	auto buildOutfit = [&](const std::string& outfit) {
@@ -5442,8 +5493,12 @@ int BodySlideApp::BuildListBodies(
 		wxString progMsg = wxString::Format(_("Processing '%s' (%d of %d)..."), wxString::FromUTF8(outfit), processedCount, (int)outfitList.size());
 		{
 			std::lock_guard<std::mutex> lock(batchBuildMutex);
-			progWnd.Update((int)(processedCount * progstep) - 1, progMsg);
-			progWnd.Fit();
+			if (progWnd) {
+				progWnd->Update((int)(processedCount * progstep) - 1, progMsg);
+				progWnd->Fit();
+			}
+			if (options && options->progress)
+				options->progress(processedCount - 1, outfitList.size(), outfit);
 			wxLogMessage(progMsg);
 		}
 
@@ -5505,7 +5560,7 @@ int BodySlideApp::BuildListBodies(
 		}
 
 		ProjectAddOns addOns;
-		AddProjectAddOns(currentSet, conformAddOnSliders, addOns, &nifBig);
+		AddProjectAddOns(currentSet, conform, addOns, &nifBig);
 
 		LogBaseProjectStatus(currentSet, &nifBig);
 		LogProjectAddOns(currentSet, addOns);
@@ -5519,7 +5574,10 @@ int BodySlideApp::BuildListBodies(
 		// Load BuildSelection file for zap choices
 		BuildSelectionFile buildSelFile;
 		BuildSelection buildSelection;
-		GetBuildSelection(buildSelFile, buildSelection);
+		if (options)
+			buildSelection = options->selection;
+		else
+			GetBuildSelection(buildSelFile, buildSelection);
 
 		bool keepZappedShapes = currentSet.KeepZappedShapes();
 
@@ -5541,7 +5599,7 @@ int BodySlideApp::BuildListBodies(
 			}
 
 			if (currentSet[s].bZap && !currentSet[s].bUV) {
-				float vbig = sliderManager.GetBigPresetValue(activePreset, name, currentSet[s].defBigValue / 100.0f);
+				float vbig = batchSliders.GetBigPresetValue(activePreset, name, currentSet[s].defBigValue / 100.0f);
 				
 				/*
 				* Note: skip applying sliderManager values on zaps in batch mode. 
@@ -5580,8 +5638,8 @@ int BodySlideApp::BuildListBodies(
 			Slider sliderValue = Slider::FromData(currentSet[s]);
 			sliderValue.linkedDataSets.clear();
 
-			sliderValue.value = sliderManager.GetBigPresetValue(activePreset, name, currentSet[s].defBigValue / 100.0f);
-			for (auto& sliderBig : sliderManager.slidersBig) {
+			sliderValue.value = batchSliders.GetBigPresetValue(activePreset, name, currentSet[s].defBigValue / 100.0f);
+			for (auto& sliderBig : batchSliders.slidersBig) {
 				if (sliderBig.name == name && sliderBig.changed && !sliderBig.clamp && !currentSet[s].bZap) {
 					sliderValue.value = sliderBig.value;
 					break;
@@ -5591,8 +5649,8 @@ int BodySlideApp::BuildListBodies(
 
 			sliderValue.value = 0.0f;
 			if (currentSet.GenWeights()) {
-				sliderValue.value = sliderManager.GetSmallPresetValue(activePreset, name, currentSet[s].defSmallValue / 100.0f);
-				for (auto& sliderSmall : sliderManager.slidersSmall) {
+				sliderValue.value = batchSliders.GetSmallPresetValue(activePreset, name, currentSet[s].defSmallValue / 100.0f);
+				for (auto& sliderSmall : batchSliders.slidersSmall) {
 					if (sliderSmall.name == name && sliderSmall.changed && !sliderSmall.clamp && !currentSet[s].bZap) {
 						sliderValue.value = sliderSmall.value;
 						break;
@@ -5698,7 +5756,7 @@ int BodySlideApp::BuildListBodies(
 		}
 
 		// Phase 2: Apply clipping fix when strength is above zero
-		if (clippingFixStrength > 0.0f) {
+		if (clippingStrength > 0.0f) {
 			auto refShape = ClippingFixer::FindReferenceShape(nifBig);
 			if (refShape) {
 				std::vector<Vector3> bodyVerts;
@@ -5708,7 +5766,7 @@ int BodySlideApp::BuildListBodies(
 
 				if (!bodyVerts.empty() && !bodyTris.empty()) {
 					ClippingFixOptions fixOpts;
-					fixOpts.strength = clippingFixStrength / 100.0f;
+					fixOpts.strength = clippingStrength / 100.0f;
 
 					for (auto it = currentSet.ShapesBegin(); it != currentSet.ShapesEnd(); ++it) {
 						auto shape = nifBig.FindBlockByName<NiShape>(it->first);
@@ -5833,7 +5891,14 @@ int BodySlideApp::BuildListBodies(
 			std::string sfMorphTargetShape = currentSet.GetSFMorphTargetShape();
 			if (tri && !triKeep && !sfMorphPath.empty() && !sfMorphTargetShape.empty()) {
 				std::string morphFolder = datapath + sfMorphPath;
-				WriteSFMorphFile(morphFolder, currentSet, nifBig, zapIdxAll);
+				if (!WriteSFMorphFile(morphFolder, currentSet, nifBig, zapIdxAll, options != nullptr)) {
+					if (options) {
+						recordFailure(outfit, "Unable to write Starfield morph.dat.");
+						return;
+					}
+				}
+				else if (options)
+					options->writtenFiles[outfit].push_back(morphFolder + PathSepStr + "morph.dat");
 			}
 		}
 		else {
@@ -5841,8 +5906,11 @@ int BodySlideApp::BuildListBodies(
 				std::string triFilePath = outFileNameBig + ".tri";
 
 				// TRI file already exists but isn't a body TRI file, don't overwrite!
-				if (wxFileName::FileExists(wxString::FromUTF8(triFilePath)) && !IsBodyTriFile(triFilePath))
+				if (wxFileName::FileExists(wxString::FromUTF8(triFilePath)) && !IsBodyTriFile(triFilePath)) {
 					triKeep = true;
+					if (options)
+						wxLogWarning("Preserved non-body TRI file '%s'; requested morphs were not written.", triFilePath);
+				}
 			}
 
 			/* Add TRI path for in-game morphs */
@@ -5855,8 +5923,15 @@ int BodySlideApp::BuildListBodies(
 													std::regex(".*meshes\\\\", std::regex_constants::icase),
 													""); // Remove everything before and including the meshes path
 
-				if (!WriteMorphTRI(outFileNameBig, currentSet, nifBig, zapIdxAll))
+				if (!WriteMorphTRI(outFileNameBig, currentSet, nifBig, zapIdxAll)) {
 					wxLogError("Failed to create TRI file to '%s'!", triPath);
+					if (options) {
+						recordFailure(outfit, "Unable to write TRI morph file.");
+						return;
+					}
+				}
+				else if (options)
+					options->writtenFiles[outfit].push_back(outFileNameBig + ".tri");
 
 				bool triToRoot = targetGame == FO4 || targetGame == FO4VR || targetGame == FO76;
 
@@ -5878,7 +5953,7 @@ int BodySlideApp::BuildListBodies(
 						SetLockedNormalsData(nifSmall, currentSet);
 				}
 			}
-			else if (!triKeep) {
+			else if (!triKeep && !options) {
 				std::string triPath = outFileNameBig + ".tri";
 				if (IsBodyTriFile(triPath))
 					wxRemoveFile(triPath);
@@ -5900,6 +5975,8 @@ int BodySlideApp::BuildListBodies(
 				recordFailure(outfit, _("Unable to save nif file: ") + outFileNameBig);
 				return;
 			}
+			if (options)
+				options->writtenFiles[outfit].push_back(outFileNameBig);
 
 			std::fstream fileSmall;
 			PlatformUtil::OpenFileStream(fileSmall, outFileNameSmall, std::ios::out | std::ios::binary);
@@ -5908,6 +5985,8 @@ int BodySlideApp::BuildListBodies(
 				recordFailure(outfit, _("Unable to save nif file: ") + outFileNameSmall);
 				return;
 			}
+			if (options)
+				options->writtenFiles[outfit].push_back(outFileNameSmall);
 		}
 		else {
 			outFileNameBig += ".nif";
@@ -5919,11 +5998,13 @@ int BodySlideApp::BuildListBodies(
 				recordFailure(outfit, _("Unable to save nif file: ") + outFileNameBig);
 				return;
 			}
+			if (options)
+				options->writtenFiles[outfit].push_back(outFileNameBig);
 		}
 	};
 
 	// Multi-threading for 64-bit only due to memory limits of 32-bit builds
-	if (sizeof(void*) >= 8 && outfitList.size() > 1) {
+	if (!options && sizeof(void*) >= 8 && outfitList.size() > 1) {
 		std::atomic<bool> buildDone = false;
 		std::thread buildTask([&] {
 			ParallelForDynamic(outfitList.size(), 1, 1, [&](size_t startIndex, size_t endIndex) {
@@ -5941,11 +6022,22 @@ int BodySlideApp::BuildListBodies(
 		buildTask.join();
 	}
 	else {
-		for (auto& outfit : outfitList)
-			buildOutfit(outfit);
+		for (auto& outfit : outfitList) {
+			try {
+				buildOutfit(outfit);
+			}
+			catch (const std::exception& error) {
+				if (!options)
+					throw;
+				recordFailure(outfit, error.what());
+			}
+			if (options && options->progress)
+				options->progress(count, outfitList.size(), outfit);
+		}
 	}
 
-	progWnd.Update(1000);
+	if (progWnd)
+		progWnd->Update(1000);
 
 	failedOutfits.insert(failedOutfitsCon.begin(), failedOutfitsCon.end());
 
@@ -6930,6 +7022,7 @@ void BodySlideFrame::OnExit(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void BodySlideFrame::OnClose(wxCloseEvent& WXUNUSED(event)) {
+	app->StopMcpServer();
 	bool previewWindowOpen = app->IsPreviewPoppedOut();
 	bool previewWasPoppedOut = previewWindowOpen || BodySlideConfig.GetBoolValue("BodySlideFrame.previewPoppedOut", false);
 	bool previewWasVisible = previewVisible || previewWindowOpen;
@@ -8185,14 +8278,19 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 		// Hide the single instance setting (only relevant for Outfit Studio)
 		XRCCTRL(*settings, "lbSingleInstanceBehavior", wxStaticText)->Hide();
 		XRCCTRL(*settings, "choiceSingleInstanceBehavior", wxChoice)->Hide();
-		XRCCTRL(*settings, "cbMcpServer", wxCheckBox)->Hide();
-		XRCCTRL(*settings, "spinMcpPort", wxSpinCtrl)->Hide();
+		auto cbMcpServer = XRCCTRL(*settings, "cbMcpServer", wxCheckBox);
+		auto spinMcpPort = XRCCTRL(*settings, "spinMcpPort", wxSpinCtrl);
+		const int oldMcpPort = BodySlideConfig.GetIntValue("MCP/Port", BodySlideMcpDefaultPort);
+		cbMcpServer->SetValue(BodySlideConfig.GetBoolValue("MCP/Enabled"));
+		cbMcpServer->SetToolTip("Start the BodySlide MCP server on this computer.");
+		spinMcpPort->SetValue(oldMcpPort);
 
 		SettingsFillDataFiles(commonControls.dataFileList, gameDataPath, Config.GetIntValue("TargetGame"));
 
 		commonControls.choiceTargetGame->Bind(wxEVT_CHOICE, &BodySlideFrame::OnChooseTargetGame, this);
 
-		if (settings->ShowModal() == wxID_OK) {
+		const bool accepted = settings->ShowModal() == wxID_OK;
+		if (accepted) {
 			int targetGameSelection = 0;
 			bool needsRestart = false;
 			SettingsDialogShared::SaveCommonSettingsDialog(
@@ -8213,6 +8311,8 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 			BodySlideConfig.SetBoolValue("BodySlideFrame.previewOnLeft", cbPreviewOnLeft->IsChecked());
 			SetPreviewOnLeft(cbPreviewOnLeft->IsChecked());
 			BodySlideConfig.SetBoolValue("ConformAddOnSliders", cbConformAddOnSliders->IsChecked());
+			BodySlideConfig.SetBoolValue("MCP/Enabled", cbMcpServer->IsChecked());
+			BodySlideConfig.SetValue("MCP/Port", spinMcpPort->GetValue());
 
 			// Only feeds a uniform, so the meshes and their textures stay as they are
 			app->ApplyComplexMaterialSetting();
@@ -8245,6 +8345,14 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 		}
 
 		delete settings;
+		// Restart after the modal settings dialog has been destroyed.
+		if (accepted && BodySlideConfig.GetBoolValue("MCP/Enabled")) {
+			if (oldMcpPort != BodySlideConfig.GetIntValue("MCP/Port", BodySlideMcpDefaultPort))
+				app->StopMcpServer();
+			app->StartMcpServer();
+		}
+		else if (accepted)
+			app->StopMcpServer();
 	}
 }
 

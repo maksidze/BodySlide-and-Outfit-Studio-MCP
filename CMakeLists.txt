@@ -456,6 +456,10 @@ set(BSOS_OUTFIT_STUDIO_SOURCES
 
 set(BSOS_BODYSLIDE_SOURCES
 	${BSOS_COMMON_SOURCES}
+	src/components/BodySlideBuildPlan.cpp
+	src/mcp/McpProtocol.cpp
+	src/mcp/McpServer.cpp
+	src/mcp/BodySlideMcp.cpp
 	src/components/BuildSelection.cpp
 	src/files/ObjFile.cpp
 	src/files/SFMaterialDatabase.cpp
@@ -515,6 +519,8 @@ if(BSOS_BUILD_TESTS)
 	enable_testing()
 
 	add_executable(BSOSTests
+		tests/BodySlideBuildPlanTest.cpp
+		src/components/BodySlideBuildPlan.cpp
 		tests/AddOnSlidersTest.cpp
 		tests/AnimTest.cpp
 		tests/ClothDataTest.cpp
